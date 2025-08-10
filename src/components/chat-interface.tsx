@@ -55,6 +55,8 @@ export function ChatInterface() {
         throw new Error("No reader available");
       }
 
+      const decoder = new TextDecoder();
+      let buffer = "";
       let assistantMessage = "";
       setMessages((prev) => [
         ...prev,
@@ -65,25 +67,48 @@ export function ChatInterface() {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const text = new TextDecoder().decode(value);
-        const lines = text.split("\n");
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? ""; // keep incomplete line for next chunk
 
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.message?.content) {
-                assistantMessage += data.message.content;
-                setMessages((prev) => {
-                  const newMessages = [...prev];
-                  newMessages[newMessages.length - 1].content = assistantMessage;
-                  return newMessages;
-                });
-              }
-            } catch (e) {
-              console.error("Error parsing SSE data:", e);
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (!line) continue;
+
+          const jsonStr = line.startsWith("data: ") ? line.slice(6) : line;
+          try {
+            const data = JSON.parse(jsonStr);
+            if (data.message?.content) {
+              assistantMessage += data.message.content;
+              setMessages((prev) => {
+                const next = [...prev];
+                next[next.length - 1].content = assistantMessage;
+                return next;
+              });
             }
+            // if (data.done) break; // optional
+          } catch {
+            // ignore malformed partials; they will complete in the next chunk
           }
+        }
+      }
+
+      // process any leftover buffered line once stream ends
+      const tail = buffer.trim();
+      if (tail) {
+        const jsonStr = tail.startsWith("data: ") ? tail.slice(6) : tail;
+        try {
+          const data = JSON.parse(jsonStr);
+          if (data.message?.content) {
+            assistantMessage += data.message.content;
+            setMessages((prev) => {
+              const next = [...prev];
+              next[next.length - 1].content = assistantMessage;
+              return next;
+            });
+          }
+        } catch {
+          // ignore
         }
       }
     } catch (error) {
